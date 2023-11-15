@@ -1,52 +1,14 @@
+from calendar import c
 from enum import Enum
 import os
-from re import M
-import subprocess
+from typing import Optional
+
+from file_utils import *
+from git_utils import *
+from interface_utils import *
+
 
 # For now, assume that the messaging happens between two users.
-
-"""
-Future work:
-- Group chats + mentions, etc.
-- Attachments (images, videos, audio, files, etc.)
-- Notifications (unseen emergency messages)
-- Read receipts (seen)
-- Typing indicators (typing)
-- Presence (online, offline, away, etc.)
-- Emojis, formatting, links, code, etc.
-- Search (by user, by time, by content, by media type etc.)
-- Edit/delete (unseen) messages
-- Emergency/silent messages
-- Message threads (like Slack) including replies and reactions -- each thread is stored as a separate file
-- Mark as unread
-- More than messaging
-    - Tasks (assigning tasks to users, etc.), Calendar, Kanban board?
-    - Notes and documents
-"""
-
-def run_command(command: list[str], critical: bool=True) -> tuple[str, bool]:
-    p = subprocess.Popen(command,
-                         stdout=subprocess.PIPE,
-                         stderr=subprocess.STDOUT)
-    output = p.stdout.read().decode("utf-8")
-    success = p.wait() == 0
-    if critical:
-        assert success, output
-    return output, success
-
-
-class MessageMode(Enum):
-    NORMAL = 0
-    EMERGENCY = 1
-    IMPORTANT = 2
-    EMERGENCY_AND_IMPORTANT = 3
-
-    def __str__(self) -> str:
-        return self.name.lower()
-    
-    @staticmethod
-    def from_string(mode_string: str) -> "MessageMode":
-        return MessageMode[mode_string.upper()]
 
 
 class Message:
@@ -54,17 +16,16 @@ class Message:
     @staticmethod
     def from_string(message_string: str) -> "Message":
         lines = message_string.split("\n")
-        return Message("\n".join(lines[:-3]), lines[-3], lines[-2], MessageMode.from_string(lines[-1]))
+        return Message("\n".join(lines[:-2]), lines[-2], lines[-1])
 
-    def __init__(self, content: str, sender: str, time: str, mode: MessageMode) -> None:
+    def __init__(self, content: str, sender: str=current_user(), time: str=current_time()) -> None:
         assert "\n\n" not in content
         self.content = content
         self.sender = sender
         self.time = time
-        self.mode = mode
 
     def __str__(self) -> str:
-        return f"{self.content}\n{self.sender}\n{self.time}\n{self.mode}\n\n"
+        return f"{self.content}\n{self.sender}\n{self.time}\n\n"
 
 
 def connect(url: str, path: str) -> None:
@@ -72,49 +33,105 @@ def connect(url: str, path: str) -> None:
     if not os.path.exists(path):
         os.makedirs(path)
     os.chdir(path)
-    if os.path.exists(os.path.join(path, repo)):
+    if os.path.exists(repo):
         os.chdir(repo)
-        run_command(["git", "pull"])
+        pulled = git_pull()
+        if pulled:
+            print("Local chat database updated.")
+        else:
+            print("Local chat database is up to date.")
     else:
-        run_command(["git", "clone", url])
+        git_clone(url)
+        print("Local chat database created.")
         os.chdir(repo)
+
+
+def get_messages(receiver: str=current_user()) -> tuple[list[Message], int]:
+    git_pull()
+    text = text_read()
+    message_strings = text.split("\n\n")
+    messages = [Message.from_string(message_string) for message_string in message_strings if message_string != ""]
+
+    last_seen_idx = get_last_seen_idx(receiver)
+    return messages, last_seen_idx
+
+
+def mark_messages_as_seen(last_seen_idx: int, seen_by: str=current_user()) -> None:
+    set_last_seen_idx(last_seen_idx, seen_by)
+    git_add("seen.csv")
+    git_commit("seen messages")
+    git_push()
+    print("Messages marked as seen.")
+
+
+def show_messages(messages: list[Message], last_seen_idx: Optional[int]=None, num_previous_messages_to_show: int=1) -> None:
+    if num_previous_messages_to_show > 0:
+        print("Last seen messages:")
+        for seen_message in messages[max(0, last_seen_idx + 1 - num_previous_messages_to_show):last_seen_idx + 1]:
+            print(seen_message)
+    if last_seen_idx == len(messages) - 1:
+        print("No unseen messages.")
+    else:
+        print("Unseen messages:")
+        for message in messages[last_seen_idx + 1:]:
+            print(message)
+    num_previous_str = input("Enter the number of previous messages to see. (Leave empty to skip.) ")
+    if num_previous_str:
+        num_previous = int(num_previous_str)
+        if num_previous > 0:
+            clear_screen()
+            show_messages(messages, last_seen_idx, num_previous)
 
 
 def send_message(message: Message) -> None:
-    with open("messages.txt", "a") as f:
-        f.write(str(message))
-    os.system("git add messages.txt")
-    os.system("git commit -m \"new message\"")
-    os.system("git push origin main")
+    messages, last_seen_idx = get_messages()
+    if last_seen_idx != len(messages) - 1:
+        to_see = yes_no_prompt("You have unseen messages. Do you want to see them? (You will still have a chance to send your message.)")
+        if to_see:
+            show_messages(messages, last_seen_idx)
+            mark_messages_as_seen(len(messages) - 1)
+            to_send = yes_no_prompt("Still want to send your message?")
+            if not to_send:
+                print("Message discarded.")
+                return
 
-
-def get_messages() -> list[Message]:
-    run_command(["git", "pull"])
-    with open("messages.txt", "r") as f:
-        text = f.read()
-    message_strings = text.split("\n\n")
-    return [Message.from_string(message_string) for message_string in message_strings if message_string != ""]
+    text_append(str(message))
+    git_add("messages.txt")
+    mark_messages_as_seen(len(messages))  # Mark the current message as seen.
+    git_add("seen.csv")
+    git_commit("new message")
+    git_push()
+    print("Message sent.")
 
 
 def clear_conversation() -> None:
-    with open("messages.txt", "w") as f:
-        f.write("")
-    os.system("git add messages.txt")
-    os.system("git commit -m \"clear conversation\"")
-    os.system("git push origin main")
+    text_clear()
+    git_add("messages.txt")
+    seen_clear()
+    git_add("seen.csv")
+    commited = git_commit("clear conversation")
+    if commited:
+        git_push()
+        print("Conversation cleared.")
+    else:    
+        print("Conversation is already clear.")
 
 
 def main() -> None:
     url = "https://github.com/ersincine/sample-chat.git"
-    path = "./"
+    path = os.getcwd()
     connect(url, path)
+    #connect(url, path)
+    #send_message(Message("Hello!"))
+    #exit()
     #clear_conversation()
     #exit()
-    send_message(Message("hello 2", "ersincine", "12:00", MessageMode.SILENT))
-    messages = get_messages()
+    
+    messages, _ = get_messages()
     for message in messages:
         print(str(message))
     # clear_conversation()
+    
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,14 @@
+"""
+class MessageMode(Enum):
+    SILENT = 0      # e.g. "I completed the task."
+    INSTANT = 1     # e.g. "Are you here?" -- Notify the receiver.
+    IMPORTANT = 2   # e.g. "I assigned you a task." -- Highlight the message.
+    EMERGENCY = 3   # e.g. "Fix the bug as soon as possible!" -- Notify the receiver and highlight the message.
+
+    def __str__(self) -> str:
+        return self.name.lower()
+    
+    @staticmethod
+    def from_string(mode_string: str) -> "MessageMode":
+        return MessageMode[mode_string.upper()]
+"""
